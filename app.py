@@ -1,23 +1,123 @@
+import base64
+import io
+import sys
+
 import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
 
+
+# ======================================================
+# PARCHE DE COMPATIBILIDAD
+# Streamlit reciente + streamlit-drawable-canvas
+# ======================================================
+# Algunas versiones nuevas de Streamlit ya no exponen:
+# streamlit.elements.image.image_to_url
+# pero streamlit-drawable-canvas todavía la usa internamente cuando se pasa
+# background_image al canvas. Este parche crea una función equivalente ANTES
+# de importar y usar st_canvas.
+def _image_to_url_compat(
+    image,
+    width=None,
+    clamp=True,
+    channels="RGB",
+    output_format="PNG",
+    image_id=None,
+    *args,
+    **kwargs,
+):
+    """Convierte una imagen PIL/NumPy/archivo en un data URL compatible con canvas."""
+    if isinstance(image, np.ndarray):
+        img = Image.fromarray(image.astype(np.uint8))
+    elif isinstance(image, Image.Image):
+        img = image.copy()
+    else:
+        img = Image.open(image)
+
+    output_format = (output_format or "PNG").upper()
+    if output_format == "JPG":
+        output_format = "JPEG"
+
+    if channels == "RGBA":
+        img = img.convert("RGBA")
+    else:
+        img = img.convert("RGB")
+
+    buffer = io.BytesIO()
+    img.save(buffer, format=output_format)
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    mime = "jpeg" if output_format == "JPEG" else output_format.lower()
+    return f"data:image/{mime};base64,{encoded}"
+
+
+def _aplicar_parche_canvas():
+    """
+    Registra image_to_url en todos los lugares donde streamlit-drawable-canvas
+    puede buscarla. No debe ir después del st_canvas; debe ir antes.
+    """
+    # 1) Parche directo al módulo nuevo/actual de Streamlit.
+    try:
+        import streamlit.elements.image as st_image_module
+        st_image_module.image_to_url = _image_to_url_compat
+    except Exception:
+        pass
+
+    # 2) Parche a cualquier módulo ya cargado que se llame igual.
+    mod = sys.modules.get("streamlit.elements.image")
+    if mod is not None:
+        try:
+            mod.image_to_url = _image_to_url_compat
+        except Exception:
+            pass
+
+    # 3) Si streamlit-drawable-canvas ya fue importado, parchear su variable global st_image.
+    drawable_mod = sys.modules.get("streamlit_drawable_canvas")
+    if drawable_mod is not None and hasattr(drawable_mod, "st_image"):
+        try:
+            drawable_mod.st_image.image_to_url = _image_to_url_compat
+        except Exception:
+            pass
+
+
+_aplicar_parche_canvas()
+
 try:
+    import streamlit_drawable_canvas as drawable_canvas_module
+
+    # Parche obligatorio después de importar el módulo, porque el componente
+    # guarda internamente una referencia llamada st_image.
+    _aplicar_parche_canvas()
+    drawable_canvas_module.st_image.image_to_url = _image_to_url_compat
+
     from streamlit_drawable_canvas import st_canvas
 except ImportError:
     st.error(
-        "Falta instalar streamlit-drawable-canvas. Ejecuta: "
+        "Falta instalar streamlit-drawable-canvas. Ejecuta en tu entorno virtual: "
         "pip install streamlit-drawable-canvas"
+    )
+    st.stop()
+
+# Verificación defensiva. Si esto no se cumple, evita llegar al error antiguo.
+if not hasattr(drawable_canvas_module.st_image, "image_to_url"):
+    st.error(
+        "No se pudo aplicar el parche de compatibilidad para streamlit-drawable-canvas. "
+        "Revisa que este bloque esté al inicio del archivo, antes de cualquier uso de st_canvas."
     )
     st.stop()
 
 import filtros
 
 
+# ======================================================
+# CONFIGURACIÓN GENERAL
+# ======================================================
 st.set_page_config(layout="wide")
 st.title("Sistema de Restauración Digital de Fotografías Degradadas")
-st.caption("Versión con máscara pintada: ya no se usa ROI rectangular para reparar zonas delicadas.")
+st.caption(
+    "Versión con máscara pintada: el usuario marca con pincel la grieta, mancha o zona dañada. "
+    "Ya no se usa ROI rectangular para zonas delicadas como rostros."
+)
 
 
 # ======================================================
@@ -37,35 +137,55 @@ def inicializar_estado():
 
 
 def calcular_vista(img_rgb, ancho_max=900):
+    """Reduce la imagen solo para mostrarla en el canvas sin perder la imagen original."""
     h, w = img_rgb.shape[:2]
     escala = min(ancho_max / w, 1.0)
-    vista_w = int(w * escala)
-    vista_h = int(h * escala)
+    vista_w = max(1, int(w * escala))
+    vista_h = max(1, int(h * escala))
     img_vista = cv2.resize(img_rgb, (vista_w, vista_h), interpolation=cv2.INTER_AREA)
     return img_vista, vista_w, vista_h
 
 
 def extraer_mascara_pincel(canvas_result, fondo_vista_rgb, forma_original):
     """
-    Obtiene la máscara pintada comparando el canvas con la imagen de fondo.
-    Esta técnica evita depender del recorte rectangular y recupera solo el trazo del usuario.
+    Convierte el dibujo del pincel en una máscara binaria del tamaño original.
+
+    La máscara se obtiene principalmente desde el canal alfa y el color rojo del trazo.
+    Esto evita detectar como daño los píxeles de la fotografía de fondo.
     """
     h_orig, w_orig = forma_original[:2]
 
-    if canvas_result.image_data is None:
+    if canvas_result is None or canvas_result.image_data is None:
         return np.zeros((h_orig, w_orig), dtype=np.uint8)
 
     canvas_rgba = canvas_result.image_data.astype(np.uint8)
-    canvas_rgb = canvas_rgba[:, :, :3]
 
-    # Diferencia entre la imagen de fondo y el canvas con pintura roja.
-    diff = cv2.absdiff(canvas_rgb, fondo_vista_rgb)
-    mask_vista = (np.max(diff, axis=2) > 12).astype(np.uint8) * 255
+    if canvas_rgba.ndim != 3 or canvas_rgba.shape[2] < 4:
+        return np.zeros((h_orig, w_orig), dtype=np.uint8)
 
-    # Limpieza leve por antialiasing del pincel.
+    rgb = canvas_rgba[:, :, :3].astype(np.int16)
+    alpha = canvas_rgba[:, :, 3]
+
+    # Trazo rojo: R claramente mayor que G y B, y con opacidad.
+    rojo_dominante = (
+        (rgb[:, :, 0] > 80)
+        & (rgb[:, :, 0] > rgb[:, :, 1] + 25)
+        & (rgb[:, :, 0] > rgb[:, :, 2] + 25)
+    )
+    tiene_opacidad = alpha > 8
+    mask_vista = (rojo_dominante & tiene_opacidad).astype(np.uint8) * 255
+
+    # Respaldo para versiones donde el canvas devuelve fondo + dibujo ya mezclados.
+    if np.count_nonzero(mask_vista) == 0 and fondo_vista_rgb is not None:
+        canvas_rgb = canvas_rgba[:, :, :3]
+        diff = cv2.absdiff(canvas_rgb, fondo_vista_rgb)
+        mask_vista = (np.max(diff, axis=2) > 25).astype(np.uint8) * 255
+
+    # Limpieza leve del antialiasing del pincel.
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask_vista = cv2.morphologyEx(mask_vista, cv2.MORPH_CLOSE, kernel)
 
+    # Llevar máscara al tamaño real de la imagen original.
     mask_original = cv2.resize(mask_vista, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
     return mask_original
 
@@ -78,6 +198,9 @@ def codificar_jpg(img_rgb):
     return buffer.tobytes()
 
 
+# ======================================================
+# CARGA DE IMAGEN
+# ======================================================
 inicializar_estado()
 
 uploaded_file = st.file_uploader(
@@ -111,7 +234,7 @@ st.sidebar.header("Panel de Control PID")
 st.sidebar.subheader("Modo de selección")
 st.sidebar.markdown(
     "Pinta directamente sobre la grieta, mancha o zona dañada. "
-    "El filtro se aplicará solo en esa máscara, no en un rectángulo completo."
+    "El filtro se aplicará solo en esa máscara, no sobre un rectángulo completo."
 )
 
 operacion = st.sidebar.selectbox(
@@ -196,8 +319,11 @@ with col_info:
         "Evita cubrir brillos de ojos, pestañas, cejas o bordes reales."
     )
     st.write(
-        "La expansión morfológica debe ser baja: normalmente 1 a 3 es suficiente. "
-        "Si la máscara invade detalles sanos, reduce expansión o tamaño del pincel."
+        "Usa una expansión baja, normalmente entre 1 y 3. "
+        "Si la máscara invade detalles sanos, reduce la expansión o el tamaño del pincel."
+    )
+    st.write(
+        "La detección automática queda como apoyo, pero para rostros es más seguro el modo pincel."
     )
 
 mascara_pintada = extraer_mascara_pincel(canvas_result, img_vista, img_actual.shape)
