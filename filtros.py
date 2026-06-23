@@ -30,10 +30,11 @@ def reparar_grietas(img_rgb, metodo_inpaint, umbral_canny1=50, umbral_canny2=150
 # ==========================================
 # ETAPA 1.5: Tratamiento de Bordes Faltantes
 # ==========================================
-def tratar_bordes_faltantes(img_rgb, modo="Relleno (Inpainting)", color_fondo="Blanco", umbral=240, dilatacion=5):
+def tratar_bordes_faltantes(img_rgb, modo="Relleno Sólido (Fondo)", color_fondo="Blanco", umbral=240, dilatacion=5,
+                            nivel_ruido=15):
     """
     Detecta zonas faltantes (huecos) mediante umbralización asumiendo un color de fondo del escáner.
-    Puede rellenar los huecos (Inpainting) o hacer un recorte inteligente (Bounding Box).
+    Puede rellenar de forma fluida, sólida con textura, o hacer un recorte inteligente.
     """
     gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
 
@@ -44,11 +45,51 @@ def tratar_bordes_faltantes(img_rgb, modo="Relleno (Inpainting)", color_fondo="B
         _, mascara_fondo = cv2.threshold(gray, umbral, 255, cv2.THRESH_BINARY_INV)
 
     # 2. Ejecutar la acción seleccionada
-    if modo == "Relleno (Inpainting)":
+    if modo == "Relleno Fluido (Inpainting)":
+        # Bueno para huecos pequeños (efecto "agua" en huecos masivos)
         kernel = np.ones((dilatacion, dilatacion), np.uint8)
         mascara_dilatada = cv2.dilate(mascara_fondo, kernel, iterations=1)
         img_restaurada = cv2.inpaint(img_rgb, mascara_dilatada, 3, cv2.INPAINT_TELEA)
         return img_restaurada, mascara_dilatada
+
+    elif modo == "Relleno Sólido (Fondo)":
+        # Solución para huecos masivos: Relleno de color + Grano sintético
+        img_restaurada = np.copy(img_rgb)
+
+        # A. Crear un anillo alrededor del hueco para muestrear el color sano
+        kernel_anillo = np.ones((15, 15), np.uint8)
+        anillo = cv2.dilate(mascara_fondo, kernel_anillo, iterations=1) - mascara_fondo
+
+        # B. Calcular el color promedio de ese anillo
+        color_promedio = cv2.mean(img_rgb, mask=anillo)[:3]
+
+        # C. Crear una matriz del mismo tamaño llena de ese color sólido
+        capa_solida = np.full_like(img_rgb, color_promedio, dtype=np.uint8)
+
+        # D. Generar ruido monocromático (Solo en escala de grises)
+        ruido_mono = np.zeros(img_rgb.shape[:2], dtype=np.int16)
+        cv2.randn(ruido_mono, 0, nivel_ruido)
+
+        # E. Aplicar el mismo ruido a los 3 canales (R, G, B) para que sea acromático
+        ruido_3d = np.stack([ruido_mono] * 3, axis=-1)
+        capa_texturizada = cv2.add(capa_solida, ruido_3d, dtype=cv2.CV_8UC3)
+
+        # F. Reemplazar SOLO los píxeles del hueco con la nueva textura
+        idx_hueco = mascara_fondo > 0
+        img_restaurada[idx_hueco] = capa_texturizada[idx_hueco]
+
+        # G. Difuminar ligeramente la "costura" (el borde de la máscara)
+        kernel_costura = np.ones((dilatacion, dilatacion), np.uint8)
+        borde_costura = cv2.dilate(mascara_fondo, kernel_costura, iterations=1) - cv2.erode(mascara_fondo,
+                                                                                            kernel_costura,
+                                                                                            iterations=1)
+        img_suavizada = cv2.GaussianBlur(img_restaurada, (7, 7), 0)
+
+        # Mezclar el borde suavizado
+        idx_costura = borde_costura > 0
+        img_restaurada[idx_costura] = img_suavizada[idx_costura]
+
+        return img_restaurada, mascara_fondo
 
     elif modo == "Recorte Inteligente (Auto-Crop)":
         mascara_foto = cv2.bitwise_not(mascara_fondo)
@@ -64,7 +105,6 @@ def tratar_bordes_faltantes(img_rgb, modo="Relleno (Inpainting)", color_fondo="B
             return img_recortada, mascara_debug
 
         return img_rgb, mascara_fondo
-
 
 # ==========================================
 # ETAPA 2: Operaciones entre píxeles

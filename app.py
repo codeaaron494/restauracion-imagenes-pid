@@ -53,15 +53,22 @@ if uploaded_file is not None:
         u2 = st.sidebar.slider("Umbral Canny Max", 50, 300, 150)
         dil = st.sidebar.slider("Grosor de Grieta (Kernel)", 1, 10, 3)
 
+
     elif operacion == "Tratamiento de Bordes Faltantes":
         modo_borde = st.sidebar.radio("Modo de Tratamiento",
-                                      ["Relleno (Inpainting)", "Recorte Inteligente (Auto-Crop)"])
+                                      ["Relleno Sólido (Fondo)", "Relleno Fluido (Inpainting)",
+                                       "Recorte Inteligente (Auto-Crop)"])
         color_fondo = st.sidebar.selectbox("Color de fondo del escáner", ["Blanco", "Negro"])
         if color_fondo == "Blanco":
             umbral_borde = st.sidebar.slider("Umbral de Detección", 200, 255, 240)
         else:
             umbral_borde = st.sidebar.slider("Umbral de Detección", 0, 50, 15)
-        dil_borde = st.sidebar.slider("Expansión del Relleno", 1, 15, 5)
+        dil_borde = st.sidebar.slider("Expansión/Suavizado", 1, 15, 5)
+        # Variable para el ruido solo si estamos en el modo sólido
+        nivel_ruido = 0
+        if modo_borde == "Relleno Sólido (Fondo)":
+            nivel_ruido = st.sidebar.slider("Grano Sintético (Ruido)", 0, 50, 15,
+                                            help="Simula la textura de la foto para que el parche no se vea plano")
 
     elif operacion == "Contraste (CLAHE/Gamma)":
         gamma = st.sidebar.slider("Corrección Gamma", 0.5, 3.0, 1.0, 0.1)
@@ -121,7 +128,7 @@ if uploaded_file is not None:
             roi_procesada, mascara_debug = filtros.reparar_grietas(roi, metodo_inp, u1, u2, dil, mascara_proteccion)
         elif operacion == "Tratamiento de Bordes Faltantes":
             roi_procesada, mascara_debug = filtros.tratar_bordes_faltantes(roi, modo_borde, color_fondo, umbral_borde,
-                                                                           dil_borde)
+                                                                           dil_borde, nivel_ruido)
         elif operacion == "Contraste (CLAHE/Gamma)":
             roi_procesada = filtros.ajustar_iluminacion_contraste(roi, gamma, clip)
         elif operacion == "Corrección Sepia (HSV)":
