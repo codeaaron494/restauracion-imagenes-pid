@@ -1,27 +1,27 @@
-# Sistema de Restauración Digital de Fotografías Degradadas
+# Sistema de Restauración Digital con Pincel
+
+Esta versión reemplaza la ROI rectangular por una máscara pintada por el usuario.
+La idea principal es que los filtros se apliquen solamente sobre la zona dañada marcada, evitando suavizar ojos, cejas, brillos u otros detalles finos.
+
+## Instalación
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Ejecución
 
 ```bash
-pip install streamlit opencv-python numpy pillow scipy
 streamlit run app.py
 ```
 
-## Cambio principal implementado
+## Flujo recomendado
 
-La herramienta de daños físicos ahora usa un flujo híbrido clásico:
+1. Sube la imagen.
+2. Selecciona la herramienta.
+3. Pinta encima de la grieta, rasguño, mancha o zona afectada.
+4. Ajusta el tamaño del pincel y la expansión morfológica.
+5. Revisa la máscara y la vista previa.
+6. Aplica el cambio solo cuando el resultado sea correcto.
 
-1. Detección de grietas claras con white top-hat.
-2. Detección de grietas oscuras con black-hat.
-3. Apoyo opcional con Canny.
-4. Limpieza con apertura, cierre y dilatación morfológica.
-5. Clasificación por componentes conectados:
-   - grietas delgadas,
-   - grietas gruesas / rasgaduras,
-   - huecos / esquinas.
-6. Relleno según tipo:
-   - interpolación orientada para grietas delgadas,
-   - inpainting clásico para rasgaduras,
-   - clonación por parche para huecos y esquinas.
-
-No se usan técnicas de machine learning, deep learning ni IA generativa.
+Para rostros, usa expansión baja y evita pintar zonas sanas como cejas, pestañas o brillos de los ojos.
