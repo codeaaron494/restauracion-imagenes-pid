@@ -1,0 +1,8 @@
+.idea/
+venv/
+.venv/
+__pycache__/
+Imagenes_Original/
+*.pyc
+.env
+.DS_Store
