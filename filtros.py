@@ -6,7 +6,8 @@ from scipy.fftpack import fft2, ifft2
 # ==========================================
 # ETAPA 1: Geometría y Morfología (Grietas)
 # ==========================================
-def reparar_grietas(img_rgb, metodo_inpaint, umbral_canny1=50, umbral_canny2=150, dilatacion=3, mascara_proteccion=None):
+def reparar_grietas(img_rgb, metodo_inpaint, umbral_canny1=50, umbral_canny2=150, dilatacion=3,
+                    mascara_proteccion=None):
     """
     Detecta grietas mediante Canny y transformaciones morfológicas.
     Soporta una máscara de protección para evitar deformar rostros.
@@ -14,7 +15,6 @@ def reparar_grietas(img_rgb, metodo_inpaint, umbral_canny1=50, umbral_canny2=150
     gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
     bordes = cv2.Canny(gray, umbral_canny1, umbral_canny2)
 
-    # Si hay protección, se apagan los bordes detectados en el rostro
     if mascara_proteccion is not None:
         bordes = cv2.bitwise_and(bordes, bordes, mask=mascara_proteccion)
 
@@ -25,6 +25,45 @@ def reparar_grietas(img_rgb, metodo_inpaint, umbral_canny1=50, umbral_canny2=150
     img_restaurada = cv2.inpaint(img_rgb, mascara, inpaintRadius=3, flags=flag)
 
     return img_restaurada, mascara
+
+
+# ==========================================
+# ETAPA 1.5: Tratamiento de Bordes Faltantes
+# ==========================================
+def tratar_bordes_faltantes(img_rgb, modo="Relleno (Inpainting)", color_fondo="Blanco", umbral=240, dilatacion=5):
+    """
+    Detecta zonas faltantes (huecos) mediante umbralización asumiendo un color de fondo del escáner.
+    Puede rellenar los huecos (Inpainting) o hacer un recorte inteligente (Bounding Box).
+    """
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+
+    # 1. Crear máscara del fondo faltante
+    if color_fondo == "Blanco":
+        _, mascara_fondo = cv2.threshold(gray, umbral, 255, cv2.THRESH_BINARY)
+    else:
+        _, mascara_fondo = cv2.threshold(gray, umbral, 255, cv2.THRESH_BINARY_INV)
+
+    # 2. Ejecutar la acción seleccionada
+    if modo == "Relleno (Inpainting)":
+        kernel = np.ones((dilatacion, dilatacion), np.uint8)
+        mascara_dilatada = cv2.dilate(mascara_fondo, kernel, iterations=1)
+        img_restaurada = cv2.inpaint(img_rgb, mascara_dilatada, 3, cv2.INPAINT_TELEA)
+        return img_restaurada, mascara_dilatada
+
+    elif modo == "Recorte Inteligente (Auto-Crop)":
+        mascara_foto = cv2.bitwise_not(mascara_fondo)
+        contornos, _ = cv2.findContours(mascara_foto, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if contornos:
+            c_max = max(contornos, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(c_max)
+            img_recortada = img_rgb[y:y + h, x:x + w]
+
+            mascara_debug = np.zeros_like(img_rgb)
+            cv2.rectangle(mascara_debug, (x, y), (x + w, y + h), (0, 255, 0), 3)
+            return img_recortada, mascara_debug
+
+        return img_rgb, mascara_fondo
 
 
 # ==========================================
@@ -74,6 +113,7 @@ def filtro_mediana(img_rgb, kernel_size=3):
 
 def filtro_wiener_frecuencia(img_rgb, psf_size=5, nsr=0.01):
     """Filtro de Wiener en el dominio de la frecuencia mediante FFT."""
+
     def procesar_canal(canal):
         canal_float = canal.astype(np.float64)
         psf = np.ones((psf_size, psf_size)) / (psf_size * psf_size)
@@ -108,23 +148,18 @@ def detectar_rostros_haar(img_rgb):
     rostros = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
     return rostros
 
+
 def fusionar_capas_protegidas(img_original, img_procesada, mascara_proteccion, difuminar=False, kernel_suavizado=15):
     """
     Motor universal de mezcla (Alpha Blending).
     Pondera la imagen original y la procesada basándose en la máscara generada en la UI.
     """
-    # Normalizar la máscara de 0-255 a rango [0.0, 1.0]
     alpha = mascara_proteccion.astype(np.float32) / 255.0
 
     if difuminar:
         if kernel_suavizado % 2 == 0: kernel_suavizado += 1
-        # Aplicar desenfoque al canal alpha para transiciones suaves (Modo 3)
         alpha = cv2.GaussianBlur(alpha, (kernel_suavizado, kernel_suavizado), 0)
 
-    # Expandir de 2D a 3D para multiplicar por los canales RGB
     alpha = np.expand_dims(alpha, axis=-1)
-
-    # Ecuación de mezcla matricial:
-    # Donde alpha es 1 (Modificable) queda procesada. Donde alpha es 0 (Rostro) queda original.
     img_final = (img_procesada * alpha) + (img_original * (1.0 - alpha))
     return np.clip(img_final, 0, 255).astype(np.uint8)
